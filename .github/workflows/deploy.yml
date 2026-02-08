@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 3️⃣ Syntax check (fails fast)
+      # 3️⃣ Syntax check
       - name: Validate Lambda code
         run: |
           python -m py_compile lambda_data_processor.py
@@ -54,8 +54,9 @@ jobs:
             --function-name data-pipeline-data-processor \
             --name live \
             --query 'FunctionVersion' \
-            --output text)
-          echo "prev=$PREV_VERSION" >> $GITHUB_OUTPUT
+            --output text || echo "")
+          echo "prev=$PREV_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Current live version: $PREV_VERSION"
 
       # 7️⃣ Upload new code
       - name: Upload Lambda code
@@ -72,8 +73,15 @@ jobs:
             --function-name data-pipeline-data-processor \
             --query 'Version' \
             --output text)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
           echo "Published version: $VERSION"
+
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Lambda version is empty"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # 9️⃣ Smoke test NEW version
       - name: Smoke test new version
@@ -92,13 +100,18 @@ jobs:
             --name live \
             --function-version ${{ steps.publish.outputs.version }}
 
-      # 🔁 Rollback automatically if ANY step failed
+      # 🔁 Rollback automatically on failure
       - name: Rollback on failure
         if: failure()
         run: |
+          if [ -z "${{ steps.current.outputs.prev }}" ]; then
+            echo "No previous version found — skipping rollback"
+            exit 0
+          fi
+
           echo "Rolling back to version ${{ steps.current.outputs.prev }}"
+
           aws lambda update-alias \
             --function-name data-pipeline-data-processor \
             --name live \
             --function-version ${{ steps.current.outputs.prev }}
-
