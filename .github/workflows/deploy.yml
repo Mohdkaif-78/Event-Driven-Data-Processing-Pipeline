@@ -1,0 +1,96 @@
+name: Deploy Lambda Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'lambda_data_processor.py'
+      - 'lambda_report_generator.py'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # Step 2: Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # Step 3: Syntax check – processor
+      - name: Test Data Processor Code
+        run: |
+          python -m py_compile lambda_data_processor.py
+          echo "✓ lambda_data_processor.py syntax OK"
+
+      # Step 4: Syntax check – reporter
+      - name: Test Report Generator Code
+        run: |
+          python -m py_compile lambda_report_generator.py
+          echo "✓ lambda_report_generator.py syntax OK"
+
+      # Step 5: Build processor ZIP
+      - name: Build Processor Lambda Package
+        run: |
+          mkdir -p build/processor
+          cp lambda_data_processor.py build/processor/index.py
+          cd build/processor
+          zip -r ../../processor.zip .
+          cd ../..
+          ls -lh processor.zip
+
+      # Step 6: Build reporter ZIP
+      - name: Build Reporter Lambda Package
+        run: |
+          mkdir -p build/reporter
+          cp lambda_report_generator.py build/reporter/index.py
+          cd build/reporter
+          zip -r ../../reporter.zip .
+          cd ../..
+          ls -lh reporter.zip
+
+      # Step 7: Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      # Step 8: Deploy processor Lambda
+      - name: Deploy Data Processor Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name data-pipeline-data-processor \
+            --zip-file fileb://processor.zip
+
+      # Step 9: Deploy reporter Lambda
+      - name: Deploy Report Generator Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name data-pipeline-report-generator \
+            --zip-file fileb://reporter.zip
+
+      # Step 10: Verify deployment
+      - name: Verify Deployment
+        run: |
+          aws lambda get-function-configuration \
+            --function-name data-pipeline-data-processor \
+            --query 'CodeSize'
+
+          aws lambda get-function-configuration \
+            --function-name data-pipeline-report-generator \
+            --query 'CodeSize'
+
+      # Step 11: Success message
+      - name: Deployment Success
+        if: success()
+        run: |
+          echo "✓ CI/CD pipeline completed successfully"
