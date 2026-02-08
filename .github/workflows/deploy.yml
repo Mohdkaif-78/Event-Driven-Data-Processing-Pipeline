@@ -1,4 +1,4 @@
-name: Deploy Lambda Functions
+name: Deploy Lambda (Blue/Green with Rollback)
 
 on:
   push:
@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - 'lambda_data_processor.py'
-      - 'lambda_report_generator.py'
       - '.github/workflows/deploy.yml'
 
 jobs:
@@ -14,30 +13,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout code
-      - name: Checkout Code
+      # 1️⃣ Checkout code
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      # Step 2: Set up Python
+      # 2️⃣ Setup Python
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      # Step 3: Syntax check – processor
-      - name: Test Data Processor Code
+      # 3️⃣ Syntax check (fails fast)
+      - name: Validate Lambda code
         run: |
           python -m py_compile lambda_data_processor.py
-          echo "✓ lambda_data_processor.py syntax OK"
 
-      # Step 4: Syntax check – reporter
-      - name: Test Report Generator Code
-        run: |
-          python -m py_compile lambda_report_generator.py
-          echo "✓ lambda_report_generator.py syntax OK"
-
-      # Step 5: Build processor ZIP
-      - name: Build Processor Lambda Package
+      # 4️⃣ Build Lambda ZIP
+      - name: Build Lambda package
         run: |
           mkdir -p build/processor
           cp lambda_data_processor.py build/processor/index.py
@@ -46,51 +38,67 @@ jobs:
           cd ../..
           ls -lh processor.zip
 
-      # Step 6: Build reporter ZIP
-      - name: Build Reporter Lambda Package
-        run: |
-          mkdir -p build/reporter
-          cp lambda_report_generator.py build/reporter/index.py
-          cd build/reporter
-          zip -r ../../reporter.zip .
-          cd ../..
-          ls -lh reporter.zip
-
-      # Step 7: Configure AWS credentials
-      - name: Configure AWS Credentials
+      # 5️⃣ Configure AWS credentials
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-north-1
 
-      # Step 8: Deploy processor Lambda
-      - name: Deploy Data Processor Lambda
+      # 6️⃣ Get current LIVE version (for rollback)
+      - name: Get current live version
+        id: current
+        run: |
+          PREV_VERSION=$(aws lambda get-alias \
+            --function-name data-pipeline-data-processor \
+            --name live \
+            --query 'FunctionVersion' \
+            --output text)
+          echo "prev=$PREV_VERSION" >> $GITHUB_OUTPUT
+
+      # 7️⃣ Upload new code
+      - name: Upload Lambda code
         run: |
           aws lambda update-function-code \
             --function-name data-pipeline-data-processor \
             --zip-file fileb://processor.zip
 
-      # Step 9: Deploy reporter Lambda
-      - name: Deploy Report Generator Lambda
+      # 8️⃣ Publish NEW version (green)
+      - name: Publish Lambda version
+        id: publish
         run: |
-          aws lambda update-function-code \
-            --function-name data-pipeline-report-generator \
-            --zip-file fileb://reporter.zip
-
-      # Step 10: Verify deployment
-      - name: Verify Deployment
-        run: |
-          aws lambda get-function-configuration \
+          VERSION=$(aws lambda publish-version \
             --function-name data-pipeline-data-processor \
-            --query 'CodeSize'
+            --query 'Version' \
+            --output text)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Published version: $VERSION"
 
-          aws lambda get-function-configuration \
-            --function-name data-pipeline-report-generator \
-            --query 'CodeSize'
-
-      # Step 11: Success message
-      - name: Deployment Success
-        if: success()
+      # 9️⃣ Smoke test NEW version
+      - name: Smoke test new version
         run: |
-          echo "✓ CI/CD pipeline completed successfully"
+          aws lambda invoke \
+            --function-name data-pipeline-data-processor \
+            --qualifier ${{ steps.publish.outputs.version }} \
+            --payload '{}' response.json
+          cat response.json
+
+      # 🔟 Switch alias (Blue → Green)
+      - name: Shift traffic to new version
+        run: |
+          aws lambda update-alias \
+            --function-name data-pipeline-data-processor \
+            --name live \
+            --function-version ${{ steps.publish.outputs.version }}
+
+      # 🔁 Rollback automatically if ANY step failed
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Rolling back to version ${{ steps.current.outputs.prev }}"
+          aws lambda update-alias \
+            --function-name data-pipeline-data-processor \
+            --name live \
+            --function-version ${{ steps.current.outputs.prev }}
+
